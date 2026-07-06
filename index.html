@@ -539,19 +539,92 @@ function ImportExport(props){
       };
       reader.readAsText(file);
     } else if(name.endsWith(".xlsx")||name.endsWith(".xls")){
-      if(typeof XLSX==="undefined"){setFeedback("Excel import not available. Please use CSV format.");return;}
+      if(typeof XLSX==="undefined"){setFeedback("Excel import not available. Please use CSV.");return;}
       var reader2=new FileReader();
       reader2.onload=function(e){
         try{
-          var wb=XLSX.read(e.target.result,{type:"array"});
+          var wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
           var ws=wb.Sheets[wb.SheetNames[0]];
-          var data=XLSX.utils.sheet_to_json(ws,{defval:""});
-          if(!data.length){setFeedback("Empty sheet.");return;}
-          var hdrs=Object.keys(data[0]);
-          setCsvHeaders(hdrs);
-          setParsedData(data.map(function(r){var o={};hdrs.forEach(function(h){o[h]=String(r[h]||"");});return o;}));
-          setFeedback("✅ Loaded "+data.length+" rows from Excel. Map columns below.");
-        }catch(err){setFeedback("Error reading Excel: "+err.message);}
+          var raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:false});
+          if(!raw||raw.length<2){setFeedback("File too short.");return;}
+          // Find header row (first row with >3 filled cells)
+          var hdrIdx=0;
+          for(var ri=0;ri<Math.min(5,raw.length);ri++){
+            if(raw[ri].filter(function(v){return v&&String(v).trim();}).length>3){hdrIdx=ri;break;}
+          }
+          var hdrs=raw[hdrIdx].map(function(h){return String(h||"").trim();});
+          var dataRows=raw.slice(hdrIdx+1).filter(function(r){return r.some(function(v){return v!==null&&v!==""&&v!==undefined;});});
+          if(!dataRows.length){setFeedback("No data rows found.");return;}
+          var parsed=dataRows.map(function(row){
+            var obj={};
+            hdrs.forEach(function(h,i){
+              var v=row[i]||"";
+              // Handle date strings from SheetJS (format: M/D/YYYY or YYYY-MM-DD)
+              if(h.toLowerCase().indexOf("date")>=0&&v&&String(v).match(/\d/)){
+                try{
+                  var d=new Date(v);
+                  if(!isNaN(d)){
+                    var yr=d.getFullYear(),mo=d.getMonth()+1,dy=d.getDate();
+                    v=yr+"-"+(mo<10?"0"+mo:mo)+"-"+(dy<10?"0"+dy:dy);
+                  }
+                }catch(ex){}
+              }
+              // Handle time strings
+              if((h.toLowerCase().indexOf("time")>=0)&&v&&String(v).match(/^\d+:\d+/)){
+                var parts=String(v).split(":");
+                var hh=parseInt(parts[0]),mm=parseInt(parts[1])||0;
+                v=(hh<10?"0"+hh:hh)+":"+(mm<10?"0"+mm:mm);
+              }
+              obj[h]=String(v).trim();
+            });
+            return obj;
+          });
+          var cleanHdrs=hdrs.filter(function(h){return h;});
+          setCsvHeaders(cleanHdrs);
+          setParsedData(parsed);
+          // Auto-map columns by name similarity
+          var aliases={
+            "symbol":["symbol","sym"],
+            "date":["date","trade date"],
+            "broker":["broker"],
+            "account":["account"],
+            "dailySetup":["daily setup"],
+            "entrySetup":["intraday setup","entry setup"],
+            "intraDaySetup":["mss msb ifvg","intra day"],
+            "intraDayTF":["intraday tf","tf"],
+            "session":["session"],
+            "daySwing":["day/ swing","day swing","swing"],
+            "positionSize":["position size","size","lots","contracts"],
+            "direction":["long/ short","direction","long/short","side"],
+            "entryTime":["entry time"],
+            "exitTime":["exit time","exit  time"],
+            "entryPrice":["entry price"],
+            "exitPrice":["exit   price","exit price"],
+            "stopLoss":["stop  loss","stop loss","sl"],
+            "target":["target","tp"],
+            "commission":["commission"],
+            "personalRating":["personal rating","rating"],
+            "emotions":["emotions"],
+            "planFollowed":["plan followed"],
+            "error":["error"],
+            "notes":["notes"],
+            "beSL":["be sl"," be sl"],
+            "afSL":["af sl"],
+            "sl1":["sl 1"],"sl2":["sl 2"],"sl3":["sl 3"],
+            "tm1":["tm 1"],"tm2":["tm 2"],"tm3":["tm 3"],
+            "tm4":["tm 4"],"tm5":["tm 5"],"tm6":["tm 6"],
+          };
+          var autoMap={};
+          cleanHdrs.forEach(function(csvH){
+            var low=csvH.toLowerCase().trim();
+            Object.keys(aliases).forEach(function(field){
+              if(autoMap[field])return;
+              if(aliases[field].some(function(a){return low===a||low.indexOf(a)>=0;})){autoMap[field]=csvH;}
+            });
+          });
+          setColMap(autoMap);
+          setFeedback("✅ "+parsed.length+" rows loaded. Auto-mapped "+Object.keys(autoMap).length+" fields. Click Import.");
+        }catch(err){setFeedback("Error: "+err.message);}
       };
       reader2.readAsArrayBuffer(file);
     } else {setFeedback("Unsupported format. Use CSV or XLSX.");}
@@ -644,30 +717,82 @@ function ImportExport(props){
 function RawTab(props){
   var fst=useState(""); var fSym=fst[0],setFSym=fst[1];
   var fot=useState(""); var fOut=fot[0],setFOut=fot[1];
+  var sel=useState({}); var selected=sel[0],setSelected=sel[1];
   var allSyms=FX_SYMBOLS.concat(FUT_SYMBOLS);
   var filtered=props.trades.filter(function(t){
     return(!fSym||t.symbol===fSym)&&(!fOut||t._outcome===fOut);
   });
-  var hdrs=["#","Mkt","Symbol","Date","Day","Session","Account","Dir","Size","Entry","SL","Target","Exit","R","Pts","P/L","Net P/L","PlanR","Outcome","Setup","★","Plan","Risk$","Risk%","Dur","Chart","Edit"];
+  var selectedCount=Object.keys(selected).filter(function(k){return selected[k];}).length;
+  var allFilteredSelected=filtered.length>0&&filtered.every(function(t){return selected[t._tid];});
+
+  function toggleOne(tid){
+    setSelected(function(p){var n=Object.assign({},p);n[tid]=!p[tid];return n;});
+  }
+  function toggleAll(){
+    if(allFilteredSelected){
+      // deselect all filtered
+      setSelected(function(p){var n=Object.assign({},p);filtered.forEach(function(t){n[t._tid]=false;});return n;});
+    } else {
+      // select all filtered
+      setSelected(function(p){var n=Object.assign({},p);filtered.forEach(function(t){n[t._tid]=true;});return n;});
+    }
+  }
+  function deleteSelected(){
+    var ids=Object.keys(selected).filter(function(k){return selected[k];});
+    if(!ids.length)return;
+    if(!window.confirm("Delete "+ids.length+" selected trades? This cannot be undone."))return;
+    ids.forEach(function(id){props.onDelete(id);});
+    setSelected({});
+  }
+  function deleteAll(){
+    if(!window.confirm("Delete ALL "+props.trades.length+" trades? This cannot be undone."))return;
+    props.onDeleteAll();
+    setSelected({});
+  }
+
+  var hdrs=["☐","#","Mkt","Symbol","Date","Day","Session","Account","Dir","Size","Entry","SL","Target","Exit","R","Pts","P/L","Net P/L","PlanR","Outcome","Setup","★","Plan","Risk$","Risk%","Dur","Chart","Edit"];
   return h("div",null,
     h("div",{style:{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}},
-      h("button",{onClick:props.onAdd,style:{background:C.blue,color:"#fff",border:"none",borderRadius:8,padding:"7px 16px",fontSize:12,fontWeight:700}},"+ Add Trade"),
-      h(Sel,{value:fSym,onChange:setFSym,opts:allSyms,ph:"All symbols",w:"140px"}),
-      h(Sel,{value:fOut,onChange:setFOut,opts:["Green","Red","Breakeven"],ph:"All outcomes",w:"130px"}),
-      h("span",{style:{color:C.dim,fontSize:11}},filtered.length+" trades")
+      h("button",{onClick:props.onAdd,style:{background:C.blue,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:700}},"+ Add Trade"),
+      h(Sel,{value:fSym,onChange:setFSym,opts:allSyms,ph:"All symbols",w:"138px"}),
+      h(Sel,{value:fOut,onChange:setFOut,opts:["Green","Red","Breakeven"],ph:"All outcomes",w:"128px"}),
+      h("span",{style:{color:C.dim,fontSize:11}},filtered.length+" trades"),
+      selectedCount>0&&h("div",{style:{display:"flex",gap:6,alignItems:"center",marginLeft:8,paddingLeft:8,borderLeft:"1px solid "+C.border}},
+        h("span",{style:{color:C.gold,fontSize:11,fontWeight:700}},selectedCount+" selected"),
+        h("button",{onClick:deleteSelected,
+          style:{background:"#3A1A1A",border:"1px solid "+C.red+"66",color:C.red,borderRadius:7,padding:"4px 12px",fontSize:11,fontWeight:700}},
+          "🗑 Delete Selected"),
+        h("button",{onClick:function(){setSelected({});},
+          style:{background:C.border,color:C.dim,border:"none",borderRadius:7,padding:"4px 10px",fontSize:11}},
+          "Clear")
+      ),
+      h("div",{style:{marginLeft:"auto"}},
+        h("button",{onClick:deleteAll,
+          style:{background:"none",border:"1px solid "+C.red+"44",color:C.red+"aa",borderRadius:7,padding:"4px 12px",fontSize:10,cursor:"pointer"}},
+          "🗑 Delete ALL Trades")
+      )
     ),
     h("div",{style:{overflowX:"auto",borderRadius:10,border:"1px solid "+C.border}},
       h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1800}},
-        h("thead",null,h("tr",null,hdrs.map(function(hd){return h(Th,{key:hd},hd);}))),
+        h("thead",null,h("tr",null,hdrs.map(function(hd,i){
+          if(i===0) return h("th",{key:"chk",style:{background:"#0A1020",padding:"7px 8px",borderBottom:"1px solid "+C.border,textAlign:"center",width:28},
+            onClick:toggleAll},
+            h("input",{type:"checkbox",checked:allFilteredSelected,onChange:toggleAll,style:{cursor:"pointer",accentColor:C.blue}}));
+          return h(Th,{key:hd},hd);
+        }))),
         h("tbody",null,
           filtered.length===0
             ?h("tr",null,h("td",{colSpan:27,style:{textAlign:"center",padding:50,color:C.dim,fontSize:13}},'No trades yet — click "+ Add Trade"'))
             :filtered.map(function(t,i){
-              var bg=i%2===0?C.row:C.rowAlt;
+              var isSelected=!!selected[t._tid];
+              var bg=isSelected?"#1A2E50":i%2===0?C.row:C.rowAlt;
               var day=t.date?new Date(t.date+"T12:00").toLocaleDateString("en",{weekday:"short"}):"—";
               var mc=t.market==="futures"?C.orange:C.blue;
               var accName=(props.accounts.find(function(a){return a.id===t.accountId;})||{name:"—"}).name;
               return h("tr",{key:t._tid||i,style:{background:bg}},
+                h(Td,null,h("input",{type:"checkbox",checked:isSelected,
+                  onChange:function(){toggleOne(t._tid);},
+                  style:{cursor:"pointer",accentColor:C.blue}})),
                 h(Td,null,t._i),
                 h(Td,null,h(Badge,{c:mc},t.market==="futures"?"Fut":"FX")),
                 h(Td,{s:{fontWeight:700,color:C.white}},t.symbol||"—"),
@@ -1369,6 +1494,7 @@ function App(){
     setShowForm(false);setEditT(null);
   }
   function delTrade(id){if(window.confirm("Delete this trade?"))setRaw(function(p){return p.filter(function(t){return t._tid!==id;});});}
+  function delAllTrades(){setRaw([]);}
   function openEdit(t){setEditT(t);setShowForm(true);}
   function openAdd(){setEditT(null);setShowForm(true);}
   function addAccount(a){setAccounts(function(p){return p.concat([a]);});}
@@ -1431,7 +1557,7 @@ function App(){
     // Content
     h("div",{style:{padding:14}},
       tab==="dashboard"&&h(DashboardTab,{trades:trades,accounts:accounts,accFilter:accFilter}),
-      tab==="raw"&&h(RawTab,{trades:trades,accounts:accounts,onEdit:openEdit,onDelete:delTrade,onAdd:openAdd}),
+      tab==="raw"&&h(RawTab,{trades:trades,accounts:accounts,onEdit:openEdit,onDelete:delTrade,onDeleteAll:delAllTrades,onAdd:openAdd}),
       tab==="daily"&&h(DailyTab,{trades:trades}),
       tab==="weekly"&&h(WeeklyTab,{trades:trades}),
       tab==="monthly"&&h(MonthlyTab,{trades:trades}),
