@@ -506,212 +506,328 @@ function TradeForm(props){
 
 
 // ─── IMPORT / EXPORT ─────────────────────────────────────────
-function ImportExport(props){
-  var fs=useState(""); var feedback=fs[0],setFeedback=fs[1];
-  var ms=useState(""); var mapping=ms[0],setMapping=ms[1];
-  var cs=useState([]); var csvHeaders=cs[0],setCsvHeaders=cs[1];
-  var pd=useState(null); var parsedData=pd[0],setParsedData=pd[1];
-  var mp=useState({}); var colMap=mp[0],setColMap=mp[1];
+// Smart column alias map - covers all common broker export formats
+var COL_ALIASES={
+  symbol:["symbol","sym","instrument","pair","ticker","asset","product","contract"],
+  date:["date","trade date","open date","close date","open_date","tradedate","entry date"],
+  account:["account","acct","account name","account type","acc type","account_type"],
+  broker:["broker","platform","source"],
+  session:["session"],
+  daySwing:["day/ swing","day/swing","day swing","swing","trade type"],
+  dailySetup:["daily setup","daily_setup","setup","bias"],
+  entrySetup:["entry setup","intraday setup","intraday_setup","entry_setup"],
+  intraDaySetup:["mss msb ifvg","intraday setup2","intra day setup","id setup"],
+  intraDayTF:["intraday tf","intraday_tf","tf","timeframe","time frame"],
+  direction:["direction","long/ short","long/short","side","type","buy/sell","action","trade direction"],
+  positionSize:["lots","position size","size","volume","qty","quantity","contracts","lot size"],
+  entryTime:["entry time"," entry time","open time","entry_time","time open","open_time"],
+  exitTime:["exit time"," exit  time","exit   time","close time","exit_time","time close","close_time"],
+  entryPrice:["entry price","entry_price","open price","open","price open"],
+  exitPrice:["exit   price","exit price","exit_price","close price","close","price close"],
+  stopLoss:["stop  loss","stop loss","sl","stop_loss","stoploss"],
+  target:["target","tp","take profit","take_profit"],
+  commission:["commission","comm","fee","swap","charges"],
+  notes:["notes","note","comment","comments","remark","remarks"],
+  beSL:["be sl"," be sl","besl","before sl"],
+  afSL:["af sl","afsl","after sl"],
+  sl1:["sl 1","sl1"],sl2:["sl 2","sl2"],sl3:["sl 3","sl3"],
+  tm1:["tm 1","tm1"],tm2:["tm 2","tm2"],tm3:["tm 3","tm3"],
+  tm4:["tm 4","tm4"],tm5:["tm 5","tm5"],tm6:["tm 6","tm6"],
+  personalRating:["personal rating","rating","score"],
+  planFollowed:["plan followed","plan_followed","followed plan"],
+  emotions:["emotions","emotion","psychology"],
+  setupType:["setup type","setup_type","grade","quality"],
+  linkToChart:["link to chart","chart link","chart url","chart","screenshot"],
+};
 
-  var tradeFields=["date","entryTime","exitTime","symbol","direction","positionSize",
-    "entryPrice","stopLoss","target","exitPrice","commission","notes"];
+function smartAutoMap(headers){
+  var mapped={};
+  headers.forEach(function(csvH){
+    var low=csvH.toLowerCase().trim().replace(/\s+/g,' ');
+    Object.keys(COL_ALIASES).forEach(function(field){
+      if(mapped[field])return;
+      var aliases=COL_ALIASES[field];
+      for(var ai=0;ai<aliases.length;ai++){
+        var a=aliases[ai].toLowerCase().trim();
+        if(low===a||low.replace(/\s+/g,'')===a.replace(/\s+/g,'')){
+          mapped[field]=csvH;return;
+        }
+      }
+      // fuzzy: if any alias is contained in header or vice versa
+      for(var ai2=0;ai2<aliases.length;ai2++){
+        var a2=aliases[ai2].toLowerCase().trim();
+        if(!mapped[field]&&(low.indexOf(a2)>=0||a2.indexOf(low)>=0)&&low.length>2){
+          mapped[field]=csvH;return;
+        }
+      }
+    });
+  });
+  return mapped;
+}
+
+function cleanVal(v){
+  if(v===null||v===undefined)return"";
+  var s=String(v).trim().replace(/\r?\n/g,"");
+  // Remove surrounding quotes
+  if(s.startsWith('"')&&s.endsWith('"'))s=s.slice(1,-1).trim();
+  return s;
+}
+function cleanNum(v){
+  var s=cleanVal(v).replace(/,/g,"");
+  return isNaN(+s)||s===""?s:s;
+}
+function parseDate(v){
+  var s=cleanVal(v);if(!s)return"";
+  // Try M/D/YYYY
+  var m1=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(m1)return m1[3]+"-"+(m1[1]<10?"0":"")+m1[1]+"-"+(m1[2]<10?"0":"")+m1[2];
+  // Try D/M/YYYY
+  var m2=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if(m2)return m2[3]+"-"+(m2[2]<10?"0":"")+m2[2]+"-"+(m2[1]<10?"0":"")+m2[1];
+  // Try YYYY-MM-DD
+  if(s.match(/^\d{4}-\d{2}-\d{2}$/))return s;
+  // Try JS Date
+  try{var d=new Date(s);if(!isNaN(d)){var yr=d.getFullYear(),mo=d.getMonth()+1,dy=d.getDate();
+    return yr+"-"+(mo<10?"0"+mo:mo)+"-"+(dy<10?"0"+dy:dy);}}catch(e){}
+  return s;
+}
+function parseTime(v){
+  var s=cleanVal(v);if(!s)return"";
+  var m=s.match(/^(\d{1,2}):(\d{2})/);
+  if(m){var h=+m[1],mi=+m[2];return(h<10?"0"+h:h)+":"+(mi<10?"0"+mi:mi);}
+  return s;
+}
+
+function convertRow(row,colMap,accounts){
+  var t=emptyT((accounts[0]||{id:"acc_1"}).id);
+  t._tid=Date.now()+Math.random();
+  Object.keys(colMap).forEach(function(field){
+    var csvCol=colMap[field];
+    var val=cleanVal(row[csvCol]);
+    if(!val)return;
+    if(field==="date")val=parseDate(val);
+    else if(field==="entryTime"||field==="exitTime")val=parseTime(val);
+    else if(["entryPrice","exitPrice","stopLoss","target","positionSize","commission"].indexOf(field)>=0)val=cleanNum(val);
+    t[field]=val;
+  });
+  // Smart account matching: try to match account name to existing accounts
+  var accVal=t.account||"";
+  var matchedAcc=accounts.find(function(a){
+    return a.name.toLowerCase().indexOf(accVal.toLowerCase())>=0||
+           accVal.toLowerCase().indexOf(a.name.toLowerCase())>=0;
+  });
+  if(matchedAcc)t.accountId=matchedAcc.id;
+  // Auto-detect market
+  t.market=isFut(t.symbol)?"futures":"forex";
+  return t;
+}
+
+function parseFileContent(text){
+  // Split into lines handling both \r\n and \n
+  var lines=text.split(/\r?\n/);
+  // Parse CSV properly (handle quoted fields)
+  var parsed=lines.map(function(line){
+    var fields=[],cur="",inQ=false;
+    for(var i=0;i<line.length;i++){
+      var c=line[i];
+      if(c==='"'){inQ=!inQ;}
+      else if(c===','&&!inQ){fields.push(cur);cur="";}
+      else{cur+=c;}
+    }
+    fields.push(cur);
+    return fields;
+  });
+  return parsed;
+}
+
+function ImportExport(props){
+  var fs=useState("idle"); var status=fs[0],setStatus=fs[1];
+  var fd=useState(""); var feedback=fd[0],setFeedback=fd[1];
+  var pd=useState(null); var preview=pd[0],setPreview=pd[1];
+  var cm=useState({}); var colMap=cm[0],setColMap=cm[1];
+  var rw=useState([]); var rawRows=rw[0],setRawRows=rw[1];
+  var sh=useState([]); var srcHeaders=sh[0],setSrcHeaders=sh[1];
+
+  function processRows(rows,accounts){
+    // Find header row: first row with >3 non-empty cells
+    var hdrIdx=-1;
+    for(var i=0;i<Math.min(10,rows.length);i++){
+      if(rows[i].filter(function(v){return cleanVal(v);}).length>3){hdrIdx=i;break;}
+    }
+    if(hdrIdx<0){setFeedback("Could not detect headers.");setStatus("error");return;}
+    var hdrs=rows[hdrIdx].map(function(h){return cleanVal(h);});
+    var dataRows=rows.slice(hdrIdx+1).filter(function(r){
+      return r.some(function(v){return cleanVal(v);});
+    });
+    if(!dataRows.length){setFeedback("No data rows found.");setStatus("error");return;}
+    // Convert to objects
+    var objs=dataRows.map(function(row){
+      var obj={};
+      hdrs.forEach(function(h,i){obj[h]=row[i]||"";});
+      return obj;
+    });
+    var mapped=smartAutoMap(hdrs);
+    setSrcHeaders(hdrs);
+    setColMap(mapped);
+    setRawRows(objs);
+    var mappedCount=Object.keys(mapped).length;
+    setPreview(objs.slice(0,3));
+    setFeedback("✅ "+dataRows.length+" rows detected. Auto-mapped "+mappedCount+"/"+hdrs.length+" columns.");
+    setStatus("ready");
+  }
 
   function handleFile(ev){
     var file=ev.target.files[0];if(!file)return;
+    setStatus("loading");setFeedback("Reading file...");setPreview(null);setRawRows([]);
     var name=file.name.toLowerCase();
-    setFeedback("Reading file...");
     if(name.endsWith(".csv")){
-      var reader=new FileReader();
-      reader.onload=function(e){
+      var r=new FileReader();
+      r.onload=function(e){
         try{
-          var lines=e.target.result.split(/\r?\n/).filter(function(l){return l.trim();});
-          if(lines.length<2){setFeedback("File too short.");return;}
-          var hdrs=lines[0].split(",").map(function(h){return h.replace(/"/g,"").trim();});
-          setCsvHeaders(hdrs);
-          var rows=lines.slice(1).map(function(l){
-            var vals=l.split(",").map(function(v){return v.replace(/"/g,"").trim();});
-            var obj={};hdrs.forEach(function(h,i){obj[h]=vals[i]||"";});
-            return obj;
-          });
-          setParsedData(rows);
-          setFeedback("✅ Loaded "+rows.length+" rows. Map columns below.");
-        }catch(err){setFeedback("Error: "+err.message);}
+          var rows=parseFileContent(e.target.result);
+          processRows(rows,props.accounts);
+        }catch(err){setFeedback("CSV error: "+err.message);setStatus("error");}
       };
-      reader.readAsText(file);
+      r.readAsText(file);
     } else if(name.endsWith(".xlsx")||name.endsWith(".xls")){
-      if(typeof XLSX==="undefined"){setFeedback("Excel import not available. Please use CSV.");return;}
-      var reader2=new FileReader();
-      reader2.onload=function(e){
+      if(typeof XLSX==="undefined"){setFeedback("Excel library not loaded. Use CSV.");setStatus("error");return;}
+      var r2=new FileReader();
+      r2.onload=function(e){
         try{
-          var wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
+          var wb=XLSX.read(e.target.result,{type:"array",cellDates:false,raw:false});
           var ws=wb.Sheets[wb.SheetNames[0]];
           var raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:false});
-          if(!raw||raw.length<2){setFeedback("File too short.");return;}
-          // Find header row (first row with >3 filled cells)
-          var hdrIdx=0;
-          for(var ri=0;ri<Math.min(5,raw.length);ri++){
-            if(raw[ri].filter(function(v){return v&&String(v).trim();}).length>3){hdrIdx=ri;break;}
-          }
-          var hdrs=raw[hdrIdx].map(function(h){return String(h||"").trim();});
-          var dataRows=raw.slice(hdrIdx+1).filter(function(r){return r.some(function(v){return v!==null&&v!==""&&v!==undefined;});});
-          if(!dataRows.length){setFeedback("No data rows found.");return;}
-          var parsed=dataRows.map(function(row){
-            var obj={};
-            hdrs.forEach(function(h,i){
-              var v=row[i]||"";
-              // Handle date strings from SheetJS (format: M/D/YYYY or YYYY-MM-DD)
-              if(h.toLowerCase().indexOf("date")>=0&&v&&String(v).match(/\d/)){
-                try{
-                  var d=new Date(v);
-                  if(!isNaN(d)){
-                    var yr=d.getFullYear(),mo=d.getMonth()+1,dy=d.getDate();
-                    v=yr+"-"+(mo<10?"0"+mo:mo)+"-"+(dy<10?"0"+dy:dy);
-                  }
-                }catch(ex){}
-              }
-              // Handle time strings
-              if((h.toLowerCase().indexOf("time")>=0)&&v&&String(v).match(/^\d+:\d+/)){
-                var parts=String(v).split(":");
-                var hh=parseInt(parts[0]),mm=parseInt(parts[1])||0;
-                v=(hh<10?"0"+hh:hh)+":"+(mm<10?"0"+mm:mm);
-              }
-              obj[h]=String(v).trim();
-            });
-            return obj;
-          });
-          var cleanHdrs=hdrs.filter(function(h){return h;});
-          setCsvHeaders(cleanHdrs);
-          setParsedData(parsed);
-          // Auto-map columns by name similarity
-          var aliases={
-            "symbol":["symbol","sym"],
-            "date":["date","trade date"],
-            "broker":["broker"],
-            "account":["account"],
-            "dailySetup":["daily setup"],
-            "entrySetup":["intraday setup","entry setup"],
-            "intraDaySetup":["mss msb ifvg","intra day"],
-            "intraDayTF":["intraday tf","tf"],
-            "session":["session"],
-            "daySwing":["day/ swing","day swing","swing"],
-            "positionSize":["position size","size","lots","contracts"],
-            "direction":["long/ short","direction","long/short","side"],
-            "entryTime":["entry time"],
-            "exitTime":["exit time","exit  time"],
-            "entryPrice":["entry price"],
-            "exitPrice":["exit   price","exit price"],
-            "stopLoss":["stop  loss","stop loss","sl"],
-            "target":["target","tp"],
-            "commission":["commission"],
-            "personalRating":["personal rating","rating"],
-            "emotions":["emotions"],
-            "planFollowed":["plan followed"],
-            "error":["error"],
-            "notes":["notes"],
-            "beSL":["be sl"," be sl"],
-            "afSL":["af sl"],
-            "sl1":["sl 1"],"sl2":["sl 2"],"sl3":["sl 3"],
-            "tm1":["tm 1"],"tm2":["tm 2"],"tm3":["tm 3"],
-            "tm4":["tm 4"],"tm5":["tm 5"],"tm6":["tm 6"],
-          };
-          var autoMap={};
-          cleanHdrs.forEach(function(csvH){
-            var low=csvH.toLowerCase().trim();
-            Object.keys(aliases).forEach(function(field){
-              if(autoMap[field])return;
-              if(aliases[field].some(function(a){return low===a||low.indexOf(a)>=0;})){autoMap[field]=csvH;}
-            });
-          });
-          setColMap(autoMap);
-          setFeedback("✅ "+parsed.length+" rows loaded. Auto-mapped "+Object.keys(autoMap).length+" fields. Click Import.");
-        }catch(err){setFeedback("Error: "+err.message);}
+          processRows(raw,props.accounts);
+        }catch(err){setFeedback("Excel error: "+err.message);setStatus("error");}
       };
-      reader2.readAsArrayBuffer(file);
-    } else {setFeedback("Unsupported format. Use CSV or XLSX.");}
+      r2.readAsArrayBuffer(file);
+    } else {setFeedback("Unsupported format. Use CSV or XLSX.");setStatus("error");}
   }
 
-  function setMap(field,csvCol){var m={};Object.keys(colMap).forEach(function(k){m[k]=colMap[k];});m[field]=csvCol;setColMap(m);}
-
-  function importData(){
-    if(!parsedData)return;
-    var accId=props.accounts[0]&&props.accounts[0].id||"acc_1";
-    var imported=parsedData.map(function(row,i){
-      var t=emptyT(accId);t._tid=Date.now()+i;
-      tradeFields.forEach(function(f){if(colMap[f]&&row[colMap[f]]!==undefined)t[f]=String(row[colMap[f]]);});
-      // Auto-detect market
-      if(t.symbol&&FUT_SYMBOLS.indexOf(t.symbol)>=0)t.market="futures";
-      else t.market="forex";
+  function doImport(){
+    if(!rawRows.length)return;
+    var imported=rawRows.map(function(row,i){
+      var t=convertRow(row,colMap,props.accounts);
+      t._tid=Date.now()+i;
       return t;
+    }).filter(function(t){
+      // Keep rows that have at least a date or symbol
+      return t.date||t.symbol;
     });
     props.onImport(imported);
-    setFeedback("✅ Imported "+imported.length+" trades!");
-    setParsedData(null);setCsvHeaders([]);setColMap({});
+    setStatus("done");
+    setFeedback("✅ Imported "+imported.length+" trades successfully!");
+    setPreview(null);setRawRows([]);setColMap({});
   }
 
   function exportCSV(accId){
-    var trades=props.trades;
-    if(accId&&accId!=="all")trades=trades.filter(function(t){return t.accountId===accId;});
-    var headers=["#","Date","Symbol","Market","Direction","Size","Entry","SL","Target","Exit","R","P/L","Net P/L","Pips/Pts","Outcome","Setup Type","Session","Broker","Account","Duration","Notes"];
-    var rows=trades.map(function(t){
-      return [t._i,t.date,t.symbol,t.market,t.direction,t.positionSize,
-        t.entryPrice,t.stopLoss,t.target,t.exitPrice,
-        t._r!==null?t._r.toFixed(2):"",t._pl!==null?t._pl.toFixed(2):"",t._netPL!==null?t._netPL.toFixed(2):"",
-        t._pts!==null?t._pts.toFixed(2):"",t._outcome,t.setupType,t.session,t.broker,t.account,t._dur,t.notes||""];
-    });
-    var csv=[headers.join(",")].concat(rows.map(function(r){return r.map(function(v){return'"'+(v||"")+'"';}).join(",");})).join("\n");
-    var blob=new Blob([csv],{type:"text/csv"});
+    var trades=accId==="all"?props.trades:props.trades.filter(function(t){return t.accountId===accId;});
+    var hdrs=["#","Date","Symbol","Market","Direction","Size","Entry","SL","Target","Exit","R","P/L","Net P/L","Points/Pips","Outcome","Setup","Type","Session","Broker","Account","Duration","Commission","Notes"];
+    var rows=trades.map(function(t){return[t._i,t.date,t.symbol,t.market,t.direction,t.positionSize,
+      t.entryPrice,t.stopLoss,t.target,t.exitPrice,
+      t._r!==null?t._r.toFixed(3):"",t._pl!==null?t._pl.toFixed(2):"",t._netPL!==null?t._netPL.toFixed(2):"",
+      t._pts!==null?t._pts.toFixed(2):"",t._outcome,t.entrySetup,t.setupType,t.session,
+      t.broker,t.account,t._dur||"",t.commission||"",t.notes||""];});
+    var csv=[hdrs.join(",")].concat(rows.map(function(r){
+      return r.map(function(v){return'"'+(String(v||"").replace(/"/g,'""'))+'"';}).join(",");
+    })).join("\n");
+    var blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
     var url=URL.createObjectURL(blob);
-    var a=document.createElement("a");a.href=url;a.download="trades_export.csv";a.click();
-    URL.revokeObjectURL(url);
+    var a=document.createElement("a");a.href=url;
+    a.download="trades_"+(accId==="all"?"all":accId)+"_"+new Date().toISOString().slice(0,10)+".csv";
+    a.click();URL.revokeObjectURL(url);
   }
 
   var accOpts=[{id:"all",name:"All Accounts"}].concat(props.accounts);
 
   return h(Modal,{onClose:props.onClose},
-    h("div",{style:{background:C.card,border:"1px solid "+C.border,borderRadius:12,width:"100%",maxWidth:600,marginTop:16,marginBottom:20}},
-      h("div",{style:{padding:"13px 18px",borderBottom:"1px solid "+C.border,display:"flex",justifyContent:"space-between",alignItems:"center"}},
-        h("span",{style:{color:C.white,fontWeight:700,fontSize:14}},"📂 Import / Export"),
+    h("div",{style:{background:C.card,border:"1px solid "+C.border,borderRadius:12,
+      width:"100%",maxWidth:640,marginTop:16,marginBottom:20}},
+      h("div",{style:{padding:"13px 18px",borderBottom:"1px solid "+C.border,
+        display:"flex",justifyContent:"space-between",alignItems:"center"}},
+        h("span",{style:{color:C.white,fontWeight:700,fontSize:14}},"📂 Smart Import / Export"),
         h("button",{onClick:props.onClose,style:{background:"none",border:"none",color:C.dim,fontSize:22,cursor:"pointer",lineHeight:1}},"×")
       ),
       h("div",{style:{padding:16}},
-        h(SH,{c:C.blue,label:"Import Trades (CSV or Excel)"}),
-        h("div",{style:{marginBottom:10}},
+        // Import section
+        h(SH,{c:C.blue,label:"Import Trades — CSV or Excel (any format)"}),
+        h("div",{style:{background:C.bg,borderRadius:8,border:"1px solid "+C.border,padding:12,marginBottom:10}},
+          h("div",{style:{color:C.dim,fontSize:10,marginBottom:8}},
+            "Upload any CSV/Excel file. The system auto-detects columns and maps them — no manual setup needed."),
           h("input",{type:"file",accept:".csv,.xlsx,.xls",onChange:handleFile,
-            style:{color:C.text,fontSize:11}}),
-          feedback&&h("div",{style:{color:C.teal,fontSize:11,marginTop:6}},feedback)
+            style:{color:C.text,fontSize:11,width:"100%"}})
         ),
-        csvHeaders.length>0&&parsedData&&h("div",null,
-          h("div",{style:{color:C.dim,fontSize:10,marginBottom:6}},"Map CSV columns to trade fields:"),
-          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}},
-            tradeFields.map(function(f){
-              return h("div",{key:f,style:{display:"flex",alignItems:"center",gap:6}},
-                h("div",{style:{color:C.text,fontSize:10,width:90,flexShrink:0}},f+":"),
-                h("select",{value:colMap[f]||"",onChange:function(ev){setMap(f,ev.target.value);},
-                  style:{flex:1,fontSize:10}},
-                  h("option",{value:""},"— skip —"),
-                  csvHeaders.map(function(h2){return h("option",{key:h2,value:h2},h2);})
-                )
+        feedback&&h("div",{style:{
+          background:status==="error"?C.red+"22":status==="done"?C.green+"22":C.blue+"22",
+          border:"1px solid "+(status==="error"?C.red:status==="done"?C.green:C.blue)+"44",
+          borderRadius:7,padding:"8px 12px",fontSize:11,
+          color:status==="error"?C.red:status==="done"?C.green:C.text,marginBottom:10}},
+          feedback
+        ),
+        // Column mapping display (read-only, shows what was auto-mapped)
+        status==="ready"&&rawRows.length>0&&h("div",null,
+          h("div",{style:{color:C.dim,fontSize:10,marginBottom:6,fontWeight:600}},"Auto-detected column mapping:"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"3px 12px",
+            background:C.bg,borderRadius:7,padding:10,border:"1px solid "+C.border,
+            maxHeight:180,overflowY:"auto",marginBottom:10}},
+            Object.keys(colMap).map(function(field){
+              return h("div",{key:field,style:{display:"flex",gap:6,alignItems:"center",padding:"2px 0"}},
+                h("span",{style:{color:C.green,fontSize:10,fontWeight:700,minWidth:90}},field+":"),
+                h("span",{style:{color:C.text,fontSize:10}},colMap[field])
               );
             })
           ),
-          h("button",{onClick:importData,style:{background:C.blue,color:"#fff",border:"none",borderRadius:8,
-            padding:"7px 18px",fontSize:12,fontWeight:700,width:"100%"}},
-            "✅ Import "+parsedData.length+" Trades")
+          // Preview table
+          preview&&preview.length>0&&h("div",{style:{marginBottom:10}},
+            h("div",{style:{color:C.dim,fontSize:10,marginBottom:4}},"Preview (first 3 rows after mapping):"),
+            h("div",{style:{overflowX:"auto",borderRadius:6,border:"1px solid "+C.border}},
+              h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:10}},
+                h("thead",null,h("tr",null,
+                  ["Symbol","Date","Direction","Entry","SL","Exit","Session"].map(function(hd){
+                    return h("th",{key:hd,style:{background:C.bg,color:C.dim,padding:"4px 8px",
+                      borderBottom:"1px solid "+C.border,whiteSpace:"nowrap"}},hd);
+                  })
+                )),
+                h("tbody",null,preview.map(function(row,i){
+                  var t=convertRow(row,colMap,props.accounts);
+                  return h("tr",{key:i,style:{background:i%2===0?C.row:C.rowAlt}},
+                    [t.symbol||"—",t.date||"—",t.direction||"—",t.entryPrice||"—",
+                     t.stopLoss||"—",t.exitPrice||"—",t.session||"—"].map(function(v,j){
+                      return h("td",{key:j,style:{color:C.text,padding:"4px 8px",
+                        borderBottom:"1px solid #151E2E",whiteSpace:"nowrap"}},v);
+                    })
+                  );
+                }))
+              )
+            )
+          ),
+          h("button",{onClick:doImport,
+            style:{background:C.green,color:"#fff",border:"none",borderRadius:8,
+              padding:"9px",fontSize:13,fontWeight:700,cursor:"pointer",width:"100%"}},
+            "✅ Import "+rawRows.length+" Trades Now")
         ),
+        status==="done"&&h("button",{onClick:function(){setStatus("idle");setFeedback("");},
+          style:{background:C.blue,color:"#fff",border:"none",borderRadius:8,
+            padding:"8px 20px",fontSize:12,fontWeight:700,marginBottom:10,width:"100%"}},
+          "Import Another File"),
         h(Divider),
+        // Export section
         h(SH,{c:C.green,label:"Export Trades to CSV"}),
         h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
           accOpts.map(function(a){
+            var cnt=a.id==="all"?props.trades.length:props.trades.filter(function(t){return t.accountId===a.id;}).length;
             return h("button",{key:a.id,onClick:function(){exportCSV(a.id);},
-              style:{background:C.row,border:"1px solid "+C.border,color:C.text,borderRadius:7,
-                padding:"6px 12px",fontSize:11}},
-              "⬇ Export "+a.name);
+              style:{background:C.row,border:"1px solid "+C.border,color:C.text,
+                borderRadius:7,padding:"6px 12px",fontSize:11,cursor:"pointer"}},
+              "⬇ "+a.name+" ("+cnt+")");
           })
         )
       )
     )
   );
 }
+
+
 
 // ─── RAW TAB ──────────────────────────────────────────────────
 function RawTab(props){
