@@ -956,7 +956,7 @@ function DashboardTab(props){
         )
       ),
       h("div",{style:CS},
-        h("div",{style:{color:C.text,fontSize:11,fontWeight:700,marginBottom:10}},"⏰ Open Time — R by Hour"},),
+        h("div",{style:{color:C.text,fontSize:11,fontWeight:700,marginBottom:10}},"⏰ Open Time — R by Hour"),
         hourData.length===0?noData:h(ResponsiveContainer,{width:"100%",height:180},
           h(BarChart,{data:hourData,barCategoryGap:"30%"},
             h(CartesianGrid,{strokeDasharray:"3 3",stroke:"#1E2D42",vertical:false}),
