@@ -510,21 +510,22 @@ function TradeForm(props){
 var COL_ALIASES={
   symbol:["symbol","sym","instrument","pair","ticker","asset","product","contract"],
   date:["date","trade date","open date","close date","open_date","tradedate","entry date"],
-  account:["account","acct","account name","account type","acc type","account_type"],
-  broker:["broker","platform","source"],
+  // account = account TYPE (EVAL/Funded/Demo), broker = the firm name (FTMO/TTP)
+  account:["account type","account_type","acc type","acct type","type of account","acc_type"],
+  broker:["broker","platform","source","account","firm","company"],
   session:["session"],
-  daySwing:["day/ swing","day/swing","day swing","swing","trade type"],
-  dailySetup:["daily setup","daily_setup","setup","bias"],
-  entrySetup:["entry setup","intraday setup","intraday_setup","entry_setup"],
-  intraDaySetup:["mss msb ifvg","intraday setup2","intra day setup","id setup"],
-  intraDayTF:["intraday tf","intraday_tf","tf","timeframe","time frame"],
-  direction:["direction","long/ short","long/short","side","type","buy/sell","action","trade direction"],
-  positionSize:["lots","position size","size","volume","qty","quantity","contracts","lot size"],
-  entryTime:["entry time"," entry time","open time","entry_time","time open","open_time"],
-  exitTime:["exit time"," exit  time","exit   time","close time","exit_time","time close","close_time"],
-  entryPrice:["entry price","entry_price","open price","open","price open"],
-  exitPrice:["exit   price","exit price","exit_price","close price","close","price close"],
-  stopLoss:["stop  loss","stop loss","sl","stop_loss","stoploss"],
+  daySwing:["day/ swing","day/swing","day swing","swing"],
+  dailySetup:["daily setup","daily_setup","daily bias","bias"],
+  entrySetup:["entry setup","entry_setup","entry pattern"],
+  intraDaySetup:["intraday setup","intraday_setup","mss msb ifvg","id setup","intra day setup"],
+  intraDayTF:["intraday tf","intraday_tf","timeframe","time frame"],
+  direction:["direction","long/ short","long/short","side","buy/sell","trade direction","long_short"],
+  positionSize:["lots","position size","size","volume","qty","quantity","contracts","lot size","lot","pos size"],
+  entryTime:["entry time"," entry time","open time","entry_time","time open","time in"],
+  exitTime:["exit time"," exit  time","exit   time","close time","exit_time","time close","time out"],
+  entryPrice:["entry price","entry_price","open price","price open","entry"],
+  exitPrice:["exit   price","exit price","exit_price","close price","price close","exit"],
+  stopLoss:["stop  loss","stop loss","sl","stop_loss","stoploss","stop"],
   target:["target","tp","take profit","take_profit"],
   commission:["commission","comm","fee","swap","charges"],
   notes:["notes","note","comment","comments","remark","remarks"],
@@ -537,11 +538,12 @@ var COL_ALIASES={
   planFollowed:["plan followed","plan_followed","followed plan"],
   emotions:["emotions","emotion","psychology"],
   setupType:["setup type","setup_type","grade","quality"],
-  linkToChart:["link to chart","chart link","chart url","chart","screenshot"],
+  linkToChart:["link to chart","chart link","chart url","screenshot"],
 };
 
 function smartAutoMap(headers){
   var mapped={};
+  // Pass 1: exact matches only
   headers.forEach(function(csvH){
     var low=csvH.toLowerCase().trim().replace(/\s+/g,' ');
     Object.keys(COL_ALIASES).forEach(function(field){
@@ -553,10 +555,17 @@ function smartAutoMap(headers){
           mapped[field]=csvH;return;
         }
       }
-      // fuzzy: if any alias is contained in header or vice versa
-      for(var ai2=0;ai2<aliases.length;ai2++){
-        var a2=aliases[ai2].toLowerCase().trim();
-        if(!mapped[field]&&(low.indexOf(a2)>=0||a2.indexOf(low)>=0)&&low.length>2){
+    });
+  });
+  // Pass 2: partial matches (only for unmapped fields, only if alias >= 5 chars)
+  headers.forEach(function(csvH){
+    var low=csvH.toLowerCase().trim().replace(/\s+/g,' ');
+    Object.keys(COL_ALIASES).forEach(function(field){
+      if(mapped[field])return;
+      var aliases=COL_ALIASES[field];
+      for(var ai=0;ai<aliases.length;ai++){
+        var a=aliases[ai].toLowerCase().trim();
+        if(a.length>=5&&low.indexOf(a)>=0){
           mapped[field]=csvH;return;
         }
       }
@@ -567,9 +576,9 @@ function smartAutoMap(headers){
 
 function cleanVal(v){
   if(v===null||v===undefined)return"";
-  var s=String(v).trim().replace(/\r?\n/g,"");
+  var s=String(v).replace(/\r/g,"").replace(/\n/g," ").trim();
   // Remove surrounding quotes
-  if(s.startsWith('"')&&s.endsWith('"'))s=s.slice(1,-1).trim();
+  if(s.charAt(0)==='"'&&s.charAt(s.length-1)==='"')s=s.slice(1,-1).trim();
   return s;
 }
 function cleanNum(v){
@@ -578,9 +587,12 @@ function cleanNum(v){
 }
 function parseDate(v){
   var s=cleanVal(v);if(!s)return"";
-  // Try M/D/YYYY
+  // Try M/D/YYYY or D/M/YYYY
   var m1=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if(m1)return m1[3]+"-"+(m1[1]<10?"0":"")+m1[1]+"-"+(m1[2]<10?"0":"")+m1[2];
+  if(m1){var mo=+m1[1],dy=+m1[2],yr=+m1[3];
+    // If day>12 it must be D/M/YYYY; otherwise assume M/D/YYYY
+    if(mo>12){var t2=mo;mo=dy;dy=t2;}
+    return yr+"-"+(mo<10?"0"+mo:mo)+"-"+(dy<10?"0"+dy:dy);}
   // Try D/M/YYYY
   var m2=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
   if(m2)return m2[3]+"-"+(m2[2]<10?"0":"")+m2[2]+"-"+(m2[1]<10?"0":"")+m2[1];
@@ -610,12 +622,18 @@ function convertRow(row,colMap,accounts){
     else if(["entryPrice","exitPrice","stopLoss","target","positionSize","commission"].indexOf(field)>=0)val=cleanNum(val);
     t[field]=val;
   });
-  // Smart account matching: try to match account name to existing accounts
-  var accVal=t.account||"";
-  var matchedAcc=accounts.find(function(a){
-    return a.name.toLowerCase().indexOf(accVal.toLowerCase())>=0||
-           accVal.toLowerCase().indexOf(a.name.toLowerCase())>=0;
-  });
+  // Smart account matching: try broker name first, then account field
+  var matchVal=t.broker||t.account||"";
+  var matchedAcc=null;
+  if(matchVal){
+    // Exact name match first
+    matchedAcc=accounts.find(function(a){return a.name.toLowerCase()===matchVal.toLowerCase();});
+    // Partial match
+    if(!matchedAcc)matchedAcc=accounts.find(function(a){
+      var an=a.name.toLowerCase(),mv=matchVal.toLowerCase();
+      return an.indexOf(mv)>=0||mv.indexOf(an)>=0;
+    });
+  }
   if(matchedAcc)t.accountId=matchedAcc.id;
   // Auto-detect market
   t.market=isFut(t.symbol)?"futures":"forex";
@@ -623,21 +641,25 @@ function convertRow(row,colMap,accounts){
 }
 
 function parseFileContent(text){
-  // Split into lines handling both \r\n and \n
-  var lines=text.split(/\r?\n/);
-  // Parse CSV properly (handle quoted fields)
-  var parsed=lines.map(function(line){
-    var fields=[],cur="",inQ=false;
-    for(var i=0;i<line.length;i++){
-      var c=line[i];
-      if(c==='"'){inQ=!inQ;}
-      else if(c===','&&!inQ){fields.push(cur);cur="";}
-      else{cur+=c;}
+  // RFC 4180 compliant CSV parser - handles multi-line quoted fields
+  var result=[],row=[],field="",inQ=false,i=0,n=text.length;
+  while(i<n){
+    var c=text[i];
+    if(inQ){
+      if(c==='"'){
+        if(text[i+1]==='"'){field+='"';i+=2;} // escaped quote
+        else{inQ=false;i++;}                   // end of quoted field
+      } else {field+=c;i++;}                   // char inside quotes (incl. newlines)
+    } else {
+      if(c==='"'){inQ=true;i++;}
+      else if(c===','){row.push(field.trim());field="";i++;}
+      else if(c==='\r'&&text[i+1]==='\n'){row.push(field.trim());result.push(row);row=[];field="";i+=2;}
+      else if(c==='\n'||c==='\r'){row.push(field.trim());result.push(row);row=[];field="";i++;}
+      else{field+=c;i++;}
     }
-    fields.push(cur);
-    return fields;
-  });
-  return parsed;
+  }
+  if(field||row.length>0){row.push(field.trim());if(row.some(function(v){return v;}))result.push(row);}
+  return result;
 }
 
 function ImportExport(props){
@@ -655,7 +677,7 @@ function ImportExport(props){
       if(rows[i].filter(function(v){return cleanVal(v);}).length>3){hdrIdx=i;break;}
     }
     if(hdrIdx<0){setFeedback("Could not detect headers.");setStatus("error");return;}
-    var hdrs=rows[hdrIdx].map(function(h){return cleanVal(h);});
+    var hdrs=rows[hdrIdx].map(function(h){return cleanVal(h).replace(/[\r\n]/g," ").trim();});
     var dataRows=rows.slice(hdrIdx+1).filter(function(r){
       return r.some(function(v){return cleanVal(v);});
     });
